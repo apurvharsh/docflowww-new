@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowRight, Sparkles, Bot, ScanSearch, SearchCheck, MessageSquare, Users, Database } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { ArrowRight, Sparkles, Bot, ScanSearch, SearchCheck, MessageSquare, Users, Database, Plus } from 'lucide-react';
 import { agentsApi, projectsApi } from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 import Card from '../components/ui/Card';
 import Badge from '../components/ui/Badge';
 import Button from '../components/ui/Button';
@@ -22,6 +23,9 @@ const StudioPage = () => {
   const [gapProject, setGapProject] = useState('');
   const [gapLoading, setGapLoading] = useState(false);
   const [teamProject, setTeamProject] = useState(null);
+  const [projectSearch, setProjectSearch] = useState('');
+  const { user } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     projectsApi.list()
@@ -43,6 +47,22 @@ const StudioPage = () => {
     }
   };
 
+  const canAddTeam = (projectId) => Boolean(
+    user?.is_org_admin || user?.project_roles?.[projectId] === 'admin'
+  );
+
+  const openTeamProject = (project) => {
+    setTeamProject(project);
+    setTeamName('');
+    setTeamError('');
+  };
+
+  const filteredProjects = projects.filter((project) => {
+    const query = projectSearch.trim().toLowerCase();
+    if (!query) return true;
+    return `${project.project_name || ''} ${project.description || ''}`.toLowerCase().includes(query);
+  });
+
   return (
     <div className="flex-1 px-6 py-8 max-w-6xl mx-auto w-full">
       <div className="mb-8">
@@ -56,37 +76,53 @@ const StudioPage = () => {
         <Link to="/studio/draft/prd" className="h-full"><Card className="h-full min-h-[180px]" title="Drafting Agent" description="Generate structured project documents from instructions." icon={Bot} /></Link>
         <Link to="/studio/scan" className="h-full"><Card className="h-full min-h-[180px]" title="Scanner Agent" description="Score and auto-revise generated drafts." icon={ScanSearch} /></Link>
         <Link to="/studio/query" className="h-full"><Card className="h-full min-h-[180px]" title="General Query Agent" description="Ask grounded questions across your project sources." icon={SearchCheck} /></Link>
-        <Link to="/studio/query?agent=rag" className="h-full"><Card className="h-full min-h-[180px]" title="RAG Retrieval Agent" description="Search authorized chunks and inspect the exact source matches." icon={Database} /></Link>
       </div>
 
-      <h2 className="text-lg font-semibold text-gray-100 mb-3">Project AI Studio</h2>
+      <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h2 className="text-lg font-semibold text-gray-100">Project AI Studio</h2>
+        <label className="relative block w-full sm:w-72">
+          <SearchCheck size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+          <input
+            type="search"
+            value={projectSearch}
+            onChange={(event) => setProjectSearch(event.target.value)}
+            placeholder="Search projects..."
+            aria-label="Search projects"
+            className="w-full rounded-lg border border-border bg-surface py-2 pl-9 pr-3 text-sm text-gray-100 outline-none transition-colors placeholder:text-gray-500 focus:border-primary"
+          />
+        </label>
+      </div>
       {error && <p className="text-red-400 text-sm mb-4">{error}</p>}
       {loading ? (
         <div className="flex justify-center py-16"><div className="w-8 h-8 border-4 border-primary/30 border-t-primary rounded-full animate-spin" /></div>
       ) : projects.length === 0 ? (
         <Card title="No projects yet" description="Create a project before opening Studio." footer={<Link to="/" className="text-sm text-primary-light hover:underline">Go to Projects</Link>} />
+      ) : filteredProjects.length === 0 ? (
+        <Card title="No matching projects" description="Try a different project name or search term." />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {projects.map((project) => (
+          {filteredProjects.map((project) => (
             <Card key={project.project_id} className="h-full min-h-[190px]" title={project.project_name} description={project.description || 'Create and scan project documents with AI agents.'} icon={Sparkles}>
               <div className="flex flex-wrap items-center gap-2">
               <div className="w-full rounded-lg border border-border bg-background/60 px-3 py-2">
                 <button
                   type="button"
-                  onClick={() => setTeamProject(project)}
+                  onClick={() => openTeamProject(project)}
                   className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-primary-light transition-colors hover:text-primary"
                 >
                   <Users size={14} /> Associated team
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setTeamProject(project)}
-                  className="mt-2 text-left text-xs text-gray-500 transition-colors hover:text-gray-300"
-                >
-                  {(project.members || []).length > 0
-                    ? `${project.members.length} member${project.members.length === 1 ? '' : 's'} assigned`
-                    : 'No members assigned yet.'}
-                </button>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => openTeamProject(project)}
+                    className="text-left text-xs text-gray-500 transition-colors hover:text-gray-300"
+                  >
+                    {(project.members || []).length > 0
+                      ? `${project.members.length} member${project.members.length === 1 ? '' : 's'} assigned`
+                      : 'No members assigned yet.'}
+                  </button>
+                </div>
               </div>
               <p className="w-full text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Project agents</p>
                 <Link to={`/projects/${project.project_id}/studio/prd`}><Button size="sm" variant="secondary" icon={Bot}>Draft</Button></Link>
@@ -118,9 +154,23 @@ const StudioPage = () => {
         onClose={() => setTeamProject(null)}
         title="Associated team"
         description={teamProject ? `${teamProject.project_name} team members` : undefined}
+        headerAction={teamProject && canAddTeam(teamProject.project_id) ? (
+          <button
+            type="button"
+            onClick={() => {
+              setTeamProject(null);
+              navigate(`/admin?project_id=${encodeURIComponent(teamProject.project_id)}`);
+            }}
+            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-primary/10 hover:text-primary"
+            aria-label={`Assign roles for ${teamProject.project_name}`}
+            title="Assign roles in this project"
+          >
+            <Plus size={18} />
+          </button>
+        ) : null}
       >
         {teamProject?.members?.length ? (
-          <div className="space-y-3">
+          <div className="max-h-[60vh] overflow-y-auto scrollbar-hidden space-y-3">
             {teamProject.members.map((member) => (
               <div key={member.user_id} className="rounded-lg border border-border bg-background/60 p-4">
                 <div className="flex items-start justify-between gap-3">

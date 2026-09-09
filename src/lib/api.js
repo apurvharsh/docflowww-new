@@ -61,6 +61,8 @@ export const authApi = {
   resetPassword: (token, new_password) => request('/auth/reset-password', { method: 'POST', body: { token, new_password }, auth: false }),
   changePassword: (current_password, new_password) => request('/auth/change-password', { method: 'POST', body: { current_password, new_password } }),
   signup: (data) => request('/signup', { method: 'POST', body: data, auth: false }),
+  signupOrganization: (data) => request('/organizations/signup', { method: 'POST', body: data, auth: false }),
+  verifyEmail: (token) => request(`/auth/verify-email?token=${encodeURIComponent(token)}`, { method: 'POST', auth: false }),
   superAdmin: () => request('/auth/super-admin', { method: 'POST', auth: false }),
   demo: () => request('/auth/demo', { method: 'POST', auth: false }),
   me: () => request('/me'),

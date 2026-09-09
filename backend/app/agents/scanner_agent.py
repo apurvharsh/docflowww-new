@@ -1,79 +1,114 @@
-"""Scanner Agent — deterministic score + revision workflow using Agno + Groq."""
+"""Scanner Agent — efficient semantic review with deterministic scoring."""
 
 from __future__ import annotations
 
-import os
-
 from agno.agent import Agent
-from agno.models.groq import Groq
+from agno.models.google import Gemini
 
+from app.config import settings
 from app.services.document_workflow import extract_document_context, reform_document, score_document
 from app.tools.document_tools import reform_document_tool, score_document_tool
 
 
 def create_scanner_agent() -> Agent:
-    api_key = os.getenv("GROQ_API_KEY")
-    model = Groq(id="openai/gpt-oss-20b", api_key=api_key or "demo-key")
+    """Create the configured scanner agent without exposing credentials."""
     return Agent(
         name="Scanner Agent",
-        model=model,
+        role=(
+            "You are a document quality scanner. Evaluate documents using the "
+            "provided scoring tool, never invent scores or criterion results, and "
+            "request a reform only when the actual score is below the threshold."
+        ),
+        model=Gemini(
+            id=settings.gemini_generation_model,
+            api_key=settings.gemini_api_key,
+        ),
         tools=[score_document_tool, reform_document_tool],
         instructions=(
-            "You are the Scanner Agent. Mandatory workflow:\n"
-            "1. Always call the score_document tool before answering with a score.\n"
-            "2. Use the tool output as the score and rationale.\n"
-            "3. If the total is below 36, create a revised suggestion using the reform_document tool.\n"
-            "4. Never invent a score; never estimate one from memory.\n"
-            "5. If the score is clean, ask for explicit confirmation before saving the document."
+            "You are the Scanner Agent for DocFlow.\n\n"
+            "Core rules:\n"
+            "1. Never calculate, estimate, guess, or invent a score.\n"
+            "2. Always call score_document_tool with the complete document content, "
+            "document type, and project stage before reporting a score.\n"
+            "3. The score_document_tool result is the only authority for the overall "
+            "score, criterion scores, criterion notes, summary, and pass/fail status.\n"
+            "4. Do not convert the 0-60 score to another scale.\n"
+            "5. The scoring tool may use semantic evidence for synonyms, alternative "
+            "headings, context, and references, but Python remains authoritative for "
+            "the final score and threshold.\n\n"
+            "Workflow:\n"
+            "- If the actual score is 36 or higher, return the actual breakdown and "
+            "summary, do not call reform_document_tool, and say that explicit human "
+            "confirmation is required before saving.\n"
+            "- If the actual score is below 36, call reform_document_tool with the "
+            "original document and actual scan result. Present the returned text only "
+            "as a suggested revision pending human review.\n"
+            "- Never save or claim to save a document automatically.\n"
+            "- Do not call score_document_tool twice for the same unchanged document."
         ),
     )
 
 
+def _tool_score_result(tools: list) -> dict | None:
+    """Extract the scoring tool's dict result across Agno tool result shapes."""
+    for tool_result in tools:
+        candidate = getattr(tool_result, "result", tool_result)
+        if isinstance(candidate, dict) and {"total", "criteria", "passed"} <= candidate.keys():
+            return candidate
+    return None
+
+
 def run_scanning_agent(message: str, state: dict | None = None) -> dict:
     state = state or {}
-    result = {
-        "response": None,
-        "tools": [],
-        "state": state,
-    }
     document_text = state.get("current_content") or message
     info = extract_document_context(message)
     document_type = state.get("document_type") or info.get("document_type") or "General Document"
     project_stage = state.get("project_stage") or info.get("project_stage") or "Requirements"
-    score = score_document(document_text, document_type, project_stage)
+    context = (
+        "Scan the following document using the required rubric. "
+        "Use score_document_tool before making any scoring claim.\n\n"
+        f"Document Type:\n{document_type}\n\n"
+        f"Project Stage:\n{project_stage}\n\n"
+        f"Document Content:\n{document_text}"
+    )
 
     try:
-        agent = create_scanner_agent()
-        context = (
-            "Score this document using the required rubric and show the actual tool result.\n"
-            f"Document type: {document_type}\n"
-            f"Project stage: {project_stage}\n"
-            f"Current content:\n{document_text}\n"
-        )
-        run_output = agent.run(context)
-        result["response"] = getattr(run_output, "content", str(run_output))
-        result["tools"] = getattr(run_output, "tools", []) or []
-        if result["tools"]:
-            tool_result = result["tools"][0]
-            if hasattr(tool_result, "result"):
-                score = tool_result.result
-    except Exception:
-        pass
+        run_output = create_scanner_agent().run(context)
+        tools = getattr(run_output, "tools", []) or []
+        score = _tool_score_result(tools)
+        if score is None:
+            raise RuntimeError("Scanner Agent did not return a valid score_document_tool result")
+        result = {
+            "response": getattr(run_output, "content", str(run_output)),
+            "tools": tools,
+            "state": state,
+            "document_type": document_type,
+            "project_stage": project_stage,
+            "score": score,
+        }
+    except Exception as exc:
+        score = score_document(document_text, document_type, project_stage)
+        result = {
+            "response": (
+                "Scanner Agent provider call failed; the local scoring tool result "
+                "was used instead. Retry to use the configured Gemini model.\n"
+                f"Provider error: {exc}"
+            ),
+            "tools": [],
+            "state": state,
+            "document_type": document_type,
+            "project_stage": project_stage,
+            "score": score,
+            "error": str(exc),
+        }
 
-    if score.get("passed"):
-        result["response"] = (
-            f"Scan passed: {score['total']}/60. "
-            "The score and criteria are based on the actual rubric output. "
-            "Confirm with 'save' to store the final document."
-        )
-    else:
+    if not score.get("passed"):
         revised = reform_document(document_text, document_type, project_stage, score)
+        result["revised_document"] = revised
         result["response"] = (
+            f"{result['response']}\n\n"
             f"Scan result: {score['total']}/60, below the 36/60 threshold.\n"
-            f"Criteria: {score['criteria']}\n\n"
             "Suggested revision (pending human review, not final):\n\n"
             f"{revised}"
         )
-        result["revised_document"] = revised
-    result["score"] = score
     return result

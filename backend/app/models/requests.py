@@ -10,13 +10,13 @@ class LoginRequest(BaseModel):
 
 
 class SignupRequest(BaseModel):
-    """Account creation request with corporate hierarchy."""
+    """Invitation-backed account creation request."""
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=8, max_length=256)
     full_name: str = Field(min_length=2, max_length=120)
-    organization: str = Field(min_length=2, max_length=160)
-    team_name: str = Field(min_length=1, max_length=100)
-    job_title: str = Field(min_length=1, max_length=100)
+    invitation_token: str = Field(min_length=20, max_length=200)
+    team_name: str | None = Field(default=None, max_length=100)
+    job_title: str | None = Field(default=None, max_length=100)
     manager_email: str | None = None
 
 

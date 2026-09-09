@@ -44,7 +44,44 @@ def initialize_database() -> None:
                 tenant_id TEXT NOT NULL,
                 is_org_admin INTEGER NOT NULL DEFAULT 0,
                 sensitivity_clearance INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                email_verified INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS organizations (
+                tenant_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS organization_members (
+                tenant_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                membership_role TEXT NOT NULL DEFAULT 'member',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, user_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_org_members_user
+                ON organization_members(user_id, status);
+            CREATE TABLE IF NOT EXISTS organization_invitations (
+                invitation_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                email TEXT NOT NULL,
+                invited_by TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                expires_at TEXT NOT NULL,
+                accepted_at TEXT,
+                revoked_at TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_org_invitations_email
+                ON organization_invitations(tenant_id, email, expires_at);
+            CREATE TABLE IF NOT EXISTS email_verification_tokens (
+                token_hash TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS password_reset_tokens (
                 token_hash TEXT PRIMARY KEY,
@@ -164,6 +201,24 @@ def initialize_database() -> None:
                 connection.execute(f"ALTER TABLE users ADD COLUMN {column} TEXT")
         if "must_change_password" not in columns:
             connection.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+        if "email_verified" not in columns:
+            connection.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0")
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "INSERT OR IGNORE INTO organizations (tenant_id, name, created_at) VALUES (?, ?, ?)",
+            (settings.dev_tenant_id, "DocFlow Development Organization", now),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO organization_members (tenant_id, user_id, membership_role, status, created_at)
+            SELECT tenant_id, user_id, CASE WHEN is_org_admin = 1 THEN 'admin' ELSE 'member' END,
+                   'active', created_at
+            FROM users
+            """
+        )
+        connection.execute(
+            "UPDATE users SET email_verified = 1 WHERE provider IN ('demo', 'google') AND email_verified = 0"
+        )
         document_columns = {row[1] for row in connection.execute("PRAGMA table_info(documents)")}
         if "visible_to_teams" not in document_columns:
             connection.execute("ALTER TABLE documents ADD COLUMN visible_to_teams TEXT NOT NULL DEFAULT '[]'")
@@ -231,11 +286,13 @@ def initialize_feature_database() -> None:
 
 def create_user(
     *, username: str, password_hash: str | None, provider: str, provider_subject: str | None,
+    tenant_id: str,
     full_name: str | None = None, organization: str | None = None,
     team_name: str | None = None, job_title: str | None = None, manager_email: str | None = None,
     is_org_admin: bool = False,
     sensitivity_clearance: int = 1,
     must_change_password: bool = False,
+    email_verified: bool = False,
 ) -> dict:
     timestamp = datetime.now(timezone.utc).isoformat()
     user = {
@@ -244,7 +301,7 @@ def create_user(
         "password_hash": password_hash,
         "provider": provider,
         "provider_subject": provider_subject,
-        "tenant_id": settings.dev_tenant_id,
+        "tenant_id": tenant_id,
         "is_org_admin": int(is_org_admin),
         "sensitivity_clearance": sensitivity_clearance,
         "created_at": timestamp,
@@ -254,16 +311,112 @@ def create_user(
         "job_title": job_title,
         "manager_email": manager_email,
         "must_change_password": int(must_change_password),
+        "email_verified": int(email_verified),
     }
     with _connect() as connection:
         connection.execute(
                 """INSERT INTO users
                     (user_id, username, password_hash, provider, provider_subject, tenant_id, is_org_admin, sensitivity_clearance, created_at,
-                     full_name, organization, team_name, job_title, manager_email, must_change_password)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                     full_name, organization, team_name, job_title, manager_email, must_change_password, email_verified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             tuple(user.values()),
         )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO organization_members
+                (tenant_id, user_id, membership_role, status, created_at)
+            VALUES (?, ?, ?, 'active', ?)
+            """,
+            (tenant_id, user["user_id"], "admin" if is_org_admin else "member", timestamp),
+        )
     return user
+
+
+def create_organization(tenant_id: str, name: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO organizations (tenant_id, name, created_at) VALUES (?, ?, ?)",
+            (tenant_id, name.strip(), datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def create_organization_invitation(
+    *, tenant_id: str, email: str, invited_by: str, token_hash: str, expires_at: str
+) -> dict:
+    invitation = {
+        "invitation_id": str(uuid4()),
+        "tenant_id": tenant_id,
+        "email": email.strip().lower(),
+        "invited_by": invited_by,
+        "token_hash": token_hash,
+        "expires_at": expires_at,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with _connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO organization_invitations
+                (invitation_id, tenant_id, email, invited_by, token_hash, expires_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            tuple(invitation.values()),
+        )
+    return invitation
+
+
+def get_valid_organization_invitation(token_hash: str) -> dict | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT * FROM organization_invitations
+            WHERE token_hash = ? AND accepted_at IS NULL AND revoked_at IS NULL
+              AND expires_at > ?
+            """,
+            (token_hash, datetime.now(timezone.utc).isoformat()),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def accept_organization_invitation(invitation_id: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE organization_invitations SET accepted_at = ? WHERE invitation_id = ?",
+            (datetime.now(timezone.utc).isoformat(), invitation_id),
+        )
+
+
+def create_email_verification_token(token_hash: str, user_id: str, expires_at: str) -> None:
+    with _connect() as connection:
+        connection.execute(
+            "INSERT INTO email_verification_tokens (token_hash, user_id, expires_at) VALUES (?, ?, ?)",
+            (token_hash, user_id, expires_at),
+        )
+
+
+def consume_email_verification_token(token_hash: str) -> str | None:
+    with _connect() as connection:
+        row = connection.execute(
+            """
+            SELECT user_id FROM email_verification_tokens
+            WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+            """,
+            (token_hash, datetime.now(timezone.utc).isoformat()),
+        ).fetchone()
+        if not row:
+            return None
+        user_id = row["user_id"]
+        now = datetime.now(timezone.utc).isoformat()
+        connection.execute(
+            "UPDATE email_verification_tokens SET used_at = ? WHERE token_hash = ?",
+            (now, token_hash),
+        )
+        connection.execute("UPDATE users SET email_verified = 1 WHERE user_id = ?", (user_id,))
+    return user_id
+
+
+def mark_user_email_verified(user_id: str) -> None:
+    with _connect() as connection:
+        connection.execute("UPDATE users SET email_verified = 1 WHERE user_id = ?", (user_id,))
 
 
 def set_password(user_id: str, password_hash: str, must_change_password: bool = False) -> None:
@@ -300,6 +453,16 @@ def consume_password_reset_token(token_hash: str) -> str | None:
 def get_user_by_username(username: str) -> dict | None:
     with _connect() as connection:
         row = connection.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    return dict(row) if row else None
+
+
+def get_user_by_email(email: str) -> dict | None:
+    """Find an account case-insensitively so one email cannot create duplicates."""
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM users WHERE lower(username) = lower(?)",
+            (email.strip(),),
+        ).fetchone()
     return dict(row) if row else None
 
 
@@ -345,6 +508,15 @@ def get_user_access_context(user_id: str):
     if not user:
         return None
     with _connect() as connection:
+        membership = connection.execute(
+            """
+            SELECT 1 FROM organization_members
+            WHERE tenant_id = ? AND user_id = ? AND status = 'active'
+            """,
+            (user["tenant_id"], user_id),
+        ).fetchone()
+        if not membership:
+            return None
         rows = connection.execute(
             """
             SELECT ur.project_id, ur.role

@@ -30,7 +30,11 @@ On first launch it creates `backend/docflow.db` (SQLite), `backend/uploads/`,
 ## Logging in
 
 - **Demo**: `POST /auth/demo` — instant admin-level token, no setup required.
-- **Email/password**: `POST /auth/signup` then `POST /auth/login`.
+- **New organization**: `POST /organizations/signup` creates an organization and
+  its first Organization Admin, who can sign in immediately.
+- **Email/password**: an organization admin creates a member account. DocFlow
+  emails the member their name, organization details, login email, and a
+  temporary password. The member must change that password after first login.
 - **Google**: configure `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `.env`,
   then hit `GET /auth/google/start` (the frontend's "Continue with Google"
   button does this). See `.env.example` for the exact redirect URI to register

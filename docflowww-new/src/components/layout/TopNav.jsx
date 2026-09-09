@@ -204,6 +204,8 @@ const TopNav = ({ onTutorialOpen }) => {
 
         <div className="relative ml-2" ref={menuRef}>
           <button
+            type="button"
+            aria-label={`Open profile for ${user?.full_name || user?.username || 'Account'}`}
             onClick={() => {
               setMenuOpen((v) => !v);
               setFaqOpen(false);
@@ -222,8 +224,9 @@ const TopNav = ({ onTutorialOpen }) => {
           {menuOpen && (
             <div className="absolute right-0 mt-2 w-56 max-w-[calc(100vw-2rem)] bg-surface border border-border rounded-lg shadow-lg overflow-visible z-[70]">
               <div className="px-4 py-3 border-b border-border/50">
-                <p className="text-sm font-medium text-gray-100 truncate">{user?.full_name || user?.username}</p>
+                <p className="text-sm font-medium text-primary-light underline underline-offset-2 truncate">{user?.full_name || user?.username}</p>
                 <p className="text-xs text-gray-500 truncate">{user?.username}</p>
+                <p className="text-xs text-gray-300 truncate mt-1">{user?.organization || 'Organization'}</p>
                 <p className="text-xs text-primary-light mt-1">{user?.role}{user?.is_org_admin ? ' · org admin' : ''}</p>
               </div>
               <button

@@ -7,7 +7,8 @@ const Modal = ({
   title,
   description,
   children,
-  footer
+  footer,
+  headerAction
 }) => {
   useEffect(() => {
     const handleEscape = (e) => {
@@ -34,12 +35,15 @@ const Modal = ({
             <h2 className="text-lg font-semibold text-gray-100">{title}</h2>
             {description && <p className="text-sm text-gray-400 mt-1">{description}</p>}
           </div>
-          <button 
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-200 transition-colors p-1 rounded-md hover:bg-surface-hover"
-          >
-            <X size={20} />
-          </button>
+          <div className="flex items-center gap-2">
+            {headerAction}
+            <button
+              onClick={onClose}
+              className="text-gray-400 hover:text-gray-200 transition-colors p-1 rounded-md hover:bg-surface-hover"
+            >
+              <X size={20} />
+            </button>
+          </div>
         </div>
         
         <div className="p-5">

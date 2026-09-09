@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from app.config import settings
-from app.database import get_user_access_context, get_user_by_id, get_user_by_username
+from app.database import get_user_access_context, get_user_by_id, get_user_by_email
 from app.models.schema import UserContext
 
 
@@ -25,7 +25,7 @@ def authenticate(username: str, password: str) -> str | None:
         supplied = _hash_password(password, salt)
         if hmac.compare_digest(supplied, expected):
             return create_token(subject=username, user_id=settings.dev_user_id)
-    user = get_user_by_username(username.strip().lower())
+    user = get_user_by_email(username)
     if not user or not user["password_hash"]:
         return None
     salt = settings.auth_secret.encode()[:16].ljust(16, b"0")

@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ArrowRight, Sparkles, Bot, ScanSearch, SearchCheck, MessageSquare, Users, Database } from 'lucide-react';
+import { Link, useNavigate } from 'react-router-dom';
+import { ArrowRight, Sparkles, Bot, ScanSearch, SearchCheck, MessageSquare, Users, Database, Plus } from 'lucide-react';
 import { agentsApi, projectsApi } from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 import Card from '../components/ui/Card';
 import Badge from '../components/ui/Badge';
 import Button from '../components/ui/Button';
@@ -22,6 +23,8 @@ const StudioPage = () => {
   const [gapProject, setGapProject] = useState('');
   const [gapLoading, setGapLoading] = useState(false);
   const [teamProject, setTeamProject] = useState(null);
+  const { user } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     projectsApi.list()
@@ -41,6 +44,14 @@ const StudioPage = () => {
     } finally {
       setGapLoading(false);
     }
+  };
+
+  const canAddTeam = (projectId) => Boolean(
+    user?.is_org_admin || user?.project_roles?.[projectId] === 'admin'
+  );
+
+  const openTeamProject = (project) => {
+    setTeamProject(project);
   };
 
   return (
@@ -73,20 +84,22 @@ const StudioPage = () => {
               <div className="w-full rounded-lg border border-border bg-background/60 px-3 py-2">
                 <button
                   type="button"
-                  onClick={() => setTeamProject(project)}
+                  onClick={() => openTeamProject(project)}
                   className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-primary-light transition-colors hover:text-primary"
                 >
                   <Users size={14} /> Associated team
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setTeamProject(project)}
-                  className="mt-2 text-left text-xs text-gray-500 transition-colors hover:text-gray-300"
-                >
-                  {(project.members || []).length > 0
-                    ? `${project.members.length} member${project.members.length === 1 ? '' : 's'} assigned`
-                    : 'No members assigned yet.'}
-                </button>
+                <div className="mt-2 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={() => openTeamProject(project)}
+                    className="text-left text-xs text-gray-500 transition-colors hover:text-gray-300"
+                  >
+                    {(project.members || []).length > 0
+                      ? `${project.members.length} member${project.members.length === 1 ? '' : 's'} assigned`
+                      : 'No members assigned yet.'}
+                  </button>
+                </div>
               </div>
               <p className="w-full text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Project agents</p>
                 <Link to={`/projects/${project.project_id}/studio/prd`}><Button size="sm" variant="secondary" icon={Bot}>Draft</Button></Link>
@@ -118,9 +131,23 @@ const StudioPage = () => {
         onClose={() => setTeamProject(null)}
         title="Associated team"
         description={teamProject ? `${teamProject.project_name} team members` : undefined}
+        headerAction={teamProject && canAddTeam(teamProject.project_id) ? (
+          <button
+            type="button"
+            onClick={() => {
+              setTeamProject(null);
+              navigate(`/admin?project_id=${encodeURIComponent(teamProject.project_id)}`);
+            }}
+            className="rounded-md p-1 text-gray-400 transition-colors hover:bg-primary/10 hover:text-primary"
+            aria-label={`Assign roles for ${teamProject.project_name}`}
+            title="Assign roles in this project"
+          >
+            <Plus size={18} />
+          </button>
+        ) : null}
       >
         {teamProject?.members?.length ? (
-          <div className="space-y-3">
+          <div className="max-h-[60vh] overflow-y-auto scrollbar-hidden space-y-3">
             {teamProject.members.map((member) => (
               <div key={member.user_id} className="rounded-lg border border-border bg-background/60 p-4">
                 <div className="flex items-start justify-between gap-3">

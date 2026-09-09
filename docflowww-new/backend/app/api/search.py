@@ -35,7 +35,7 @@ from app.database import (
     list_all_documents as database_list_all_documents, list_documents as database_list_documents,
     list_projects as database_list_projects, record_document, get_valid_stages, get_user_role,
     set_user_role, remove_user_role, get_document_workflow_state, approve_document, reject_document, audit_log,
-    get_audit_log, get_user_notifications, get_project_activity, get_user_by_id, get_user_access_context, get_document, get_project, list_users,
+    get_audit_log, get_user_notifications, get_project_activity, get_user_by_id, get_user_by_email, get_user_access_context, get_document, get_project, list_users,
     link_user_provider, set_password, create_password_reset_token, consume_password_reset_token,
     submit_document, update_user_access, create_project, create_note, list_notes,
     create_document_version, list_document_versions, create_personal_document,
@@ -46,6 +46,7 @@ from app.authorization import ADMIN, TEAM_LEAD, can_create_project, can_view_doc
 from app.ingestion.chunking import ParsedSection, chunk_document
 from app.ingestion.document_text import extract_text
 from app.ingestion.indexing import index_chunks, update_document_workflow_state
+from app.ingestion.collection_setup import collection_name
 from app.models.schema import UserContext
 from app.retrieval.access_filter import build_access_filter
 from app.retrieval.embeddings import embed_dense, embed_sparse, generate_answer, is_general_question, review_document_lines
@@ -321,14 +322,14 @@ def google_callback(code: str, state: str, request: Request, response: Response)
     subject = identity["subject"]
     user = get_user_by_provider_subject("google", subject)
     if user is None:
-        user = get_user_by_username(identity["email"])
+        user = get_user_by_email(identity["email"])
         if user:
             link_user_provider(user["user_id"], "google", subject)
         else:
-            try:
-                user = create_user(username=identity["email"], password_hash=None, provider="google", provider_subject=subject, full_name=identity.get("name"))
-            except Exception as exc:
-                raise HTTPException(status_code=409, detail="Could not create Google account") from exc
+            raise HTTPException(
+                status_code=403,
+                detail="Google sign-in is available only for existing organization members.",
+            )
     response.delete_cookie("google_oauth_state")
     response.status_code = 303
     token = create_token(subject=user["username"], user_id=user["user_id"])
@@ -578,15 +579,15 @@ def list_projects(
             if member.get("team_name") and member["team_name"].strip()
         })
         project_role = role_for_project(user, project["project_id"])
-        if user.is_org_admin:
-            assigned_teams = []
-        elif project_role != ADMIN:
+        if not user.is_org_admin and project_role != ADMIN:
             visible_teams = set(user.team_memberships.get(project["project_id"], []))
             assigned_teams = [team for team in assigned_teams if team in visible_teams]
         project["assigned_teams"] = assigned_teams
     if user.is_org_admin:
         return projects
     return [project for project in projects if project["project_id"] in user.project_roles]
+
+
 
 
 @app.post("/projects", response_model=ProjectSummary, status_code=201)
@@ -1147,9 +1148,14 @@ def create_organization_user(
     if not admin_user.is_org_admin:
         raise HTTPException(status_code=403, detail="Only organization admins can add users")
     email = request.email.strip().lower()
-    if get_user_by_username(email):
+    if email == settings.auth_username.lower() or get_user_by_email(email):
         raise HTTPException(status_code=409, detail="An account with that email already exists")
-    temporary_password = secrets.token_urlsafe(12)
+    admin_record = get_user_by_id(admin_user.user_id)
+    organization_name = (admin_record or {}).get("organization") or "your organization"
+    temporary_password = "".join(
+        secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%")
+        for _ in range(14)
+    )
     salt = settings.auth_secret.encode()[:16].ljust(16, b"0")
     created = create_user(
         username=email,
@@ -1157,21 +1163,26 @@ def create_organization_user(
         provider="password",
         provider_subject=None,
         full_name=request.full_name.strip(),
-        organization=admin_user.tenant_id,
+        organization=organization_name,
         team_name=request.team_name.strip() if request.team_name else None,
         job_title=request.job_title.strip() if request.job_title else None,
         must_change_password=True,
+        email_verified=True,
     )
     audit_log(admin_user.tenant_id, admin_user.user_id, "CREATE_USER", "user", created["user_id"], f"email={email}")
     from app.services.email_notifications import send_notification_email
     send_notification_email(
         email,
-        "Your DocFlow organization account",
-        f"An administrator created a DocFlow account for you.\n\n"
-        f"Email: {email}\nTemporary password: {temporary_password}\n\n"
-        "Sign in and change this password immediately.",
+        f"Welcome to {organization_name} on DocFlow",
+        f"Hello {request.full_name.strip()},\n\n"
+        f"Welcome to {organization_name}. Your DocFlow account has been created by your organization administrator.\n\n"
+        f"Sign in at: {settings.frontend_url.rstrip('/')}/login\n"
+        f"Email: {email}\n"
+        f"Temporary password: {temporary_password}\n\n"
+        "For your security, you will be asked to change this temporary password after your first sign-in.\n"
+        "Welcome to the team!",
     )
-    return {"status": "created", "user_id": created["user_id"], "email": email}
+    return {"status": "created", "user_id": created["user_id"], "email": email, "full_name": request.full_name.strip()}
 
 
 @app.delete("/admin/users/{user_id}")
@@ -1225,6 +1236,10 @@ def assign_user_access(
     target = get_user_by_username(request.email.strip().lower())
     if not target or target["tenant_id"] != admin_user.tenant_id:
         raise HTTPException(status_code=404, detail="User was not found in your organization")
+    if target["user_id"] == admin_user.user_id:
+        raise HTTPException(status_code=409, detail="Organization admins already have full access")
+    if target.get("is_org_admin") and not admin_user.is_org_admin:
+        raise HTTPException(status_code=403, detail="Only organization admins can modify organization-admin access")
     update_user_access(
         target["user_id"],
         is_org_admin=True,
@@ -1243,6 +1258,8 @@ def assign_project_access(
     target = get_user_by_username(request.email.strip().lower())
     if not target or target["tenant_id"] != admin_user.tenant_id:
         raise HTTPException(status_code=404, detail="User was not found in your organization")
+    if target["user_id"] == admin_user.user_id:
+        raise HTTPException(status_code=409, detail="Organization admins already have full access")
     if not get_project(admin_user.tenant_id, request.project_id):
         raise HTTPException(status_code=404, detail="Project was not found in your organization")
     caller_role = "org_admin" if admin_user.is_org_admin else admin_user.project_roles.get(request.project_id)
@@ -1795,6 +1812,35 @@ def ask_documents(
                 project_documents,
                 get_valid_stages(user.tenant_id),
             )
+            all_project_chunks = []
+            next_offset = None
+            while True:
+                points, next_offset = client.scroll(
+                    collection_name=collection_name(user.tenant_id),
+                    scroll_filter=access_filter,
+                    limit=256,
+                    offset=next_offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                all_project_chunks.extend(
+                    point.payload for point in points
+                    if point.payload and point.payload.get("project_id") == request.project_id
+                )
+                if next_offset is None:
+                    break
+            all_project_chunks.sort(key=lambda item: (
+                item.get("document_id", ""),
+                item.get("section_title", ""),
+                item.get("chunk_index", 0),
+            ))
+            full_project_source = "\n\n".join(
+                f"[Document: {chunk.get('document_id', 'unknown')}, "
+                f"{chunk.get('section_title', 'Unknown section')}]\n"
+                f"{chunk.get('chunk_text', '')}"
+                for chunk in all_project_chunks
+            )
+            project_context = f"{project_context}\n\nComplete project documents:\n{full_project_source}"
         answer = generate_answer(
             "You are DocFlow's General Query Agent. Gemini must handle the complete request. "
             "Treat every stage in the selected project as relevant context, not only the stage "

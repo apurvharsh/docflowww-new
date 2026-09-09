@@ -9,6 +9,7 @@ build_access_filter.
 from pathlib import Path
 from uuid import uuid4
 import hmac
+import html
 import json
 import hashlib
 import re
@@ -21,7 +22,6 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Respon
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse
-from docx import Document
 from docx.shared import Inches, Pt
 from pydantic import BaseModel, Field, field_validator
 from qdrant_client import QdrantClient, models
@@ -31,12 +31,15 @@ from app.agent_runtime import create_default_state, handle_cli_message
 from app.auth import _hash_password, authenticate, create_oauth_state, create_token, exchange_google_code, google_authorization_url, google_is_configured, oauth_state_cookie_kwargs, user_from_token, validate_oauth_state
 from app.telemetry import PerformanceMetrics
 from app.database import (
-    create_user, delete_user, delete_document, get_user_by_provider_subject, get_user_by_username, initialize_database,
+    create_user, delete_user, delete_document, get_user_by_provider_subject, get_user_by_username, get_user_by_email, initialize_database,
     list_all_documents as database_list_all_documents, list_documents as database_list_documents,
     list_projects as database_list_projects, record_document, get_valid_stages, get_user_role,
     set_user_role, remove_user_role, get_document_workflow_state, approve_document, reject_document, audit_log,
     get_audit_log, get_user_notifications, get_project_activity, get_user_by_id, get_user_access_context, get_document, get_project, list_users,
     link_user_provider, set_password, create_password_reset_token, consume_password_reset_token,
+    get_valid_organization_invitation, accept_organization_invitation,
+    create_email_verification_token, consume_email_verification_token,
+    create_organization,
     submit_document, update_user_access, create_project, create_note, list_notes,
     create_document_version, list_document_versions, create_personal_document,
     list_personal_documents, create_chat_session, list_chat_sessions,
@@ -46,6 +49,7 @@ from app.authorization import ADMIN, TEAM_LEAD, can_create_project, can_view_doc
 from app.ingestion.chunking import ParsedSection, chunk_document
 from app.ingestion.document_text import extract_text
 from app.ingestion.indexing import index_chunks, update_document_workflow_state
+from app.ingestion.collection_setup import collection_name
 from app.models.schema import UserContext
 from app.retrieval.access_filter import build_access_filter
 from app.retrieval.embeddings import embed_dense, embed_sparse, generate_answer, is_general_question, review_document_lines
@@ -198,31 +202,134 @@ class SignupRequest(BaseModel):
     email: str = Field(min_length=5, max_length=254)
     password: str = Field(min_length=8, max_length=256)
     full_name: str = Field(min_length=2, max_length=120)
-    organization: str = Field(min_length=2, max_length=160)
-    team_name: str = Field(min_length=2, max_length=120)
-    job_title: str = Field(min_length=2, max_length=120)
+    invitation_token: str = Field(min_length=20, max_length=200)
+    team_name: str | None = Field(default=None, max_length=120)
+    job_title: str | None = Field(default=None, max_length=120)
     manager_email: str | None = Field(default=None, max_length=254)
 
 
-@app.post("/signup", response_model=LoginResponse, status_code=201)
+class OrganizationSignupRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    password: str = Field(min_length=8, max_length=256)
+    full_name: str = Field(min_length=2, max_length=120)
+    organization_name: str = Field(min_length=2, max_length=160)
+    job_title: str | None = Field(default=None, max_length=120)
+
+
+def _send_verification_email(
+    email: str,
+    user_id: str,
+    *,
+    organization_name: str | None = None,
+) -> None:
+    from app.services.email_notifications import send_notification_email
+    if organization_name:
+        subject = f"{organization_name} is onboarded on DocFlow"
+        body = (
+            f"Welcome to DocFlow. {organization_name} has been successfully onboarded.\n\n"
+            "You are the first Organization Admin for this workspace. You can sign in, "
+            "create projects, and invite your team members immediately.\n\n"
+            "Complete onboarding:\n"
+            "1. Sign in with the email address and password you registered.\n"
+            "2. Open the Admin area to invite your organization members.\n\n"
+            "If you did not create this organization, contact your DocFlow administrator."
+        )
+    else:
+        subject = "Welcome to DocFlow"
+        body = (
+            "Welcome to DocFlow. Your organization administrator invited you to join "
+            "the workspace.\n\n"
+            "You can sign in immediately with the email address and password you registered."
+        )
+    send_notification_email(email, subject, body)
+
+
+@app.post("/organizations/signup", status_code=201)
+def signup_organization(request: OrganizationSignupRequest):
+    """Create an organization and its first Organization Admin."""
+    email = request.email.strip().lower()
+    organization_name = request.organization_name.strip()
+    if "@" not in email or email.startswith("@") or email.endswith("@"):
+        raise HTTPException(status_code=422, detail="Enter a valid email address")
+    if email == settings.auth_username.lower() or get_user_by_email(email):
+        raise HTTPException(
+            status_code=409,
+            detail="This email is already associated with an organization account and cannot create another organization.",
+        )
+
+    tenant_id = str(uuid4())
+    create_organization(tenant_id, organization_name)
+    salt = settings.auth_secret.encode()[:16].ljust(16, b"0")
+    user = create_user(
+        username=email,
+        password_hash=_hash_password(request.password, salt),
+        provider="password",
+        provider_subject=None,
+        tenant_id=tenant_id,
+        full_name=request.full_name.strip(),
+        organization=organization_name,
+        job_title=request.job_title.strip() if request.job_title else None,
+        is_org_admin=True,
+        email_verified=True,
+    )
+    _send_verification_email(
+        email,
+        user["user_id"],
+        organization_name=organization_name,
+    )
+    return {
+        "status": "created",
+        "message": "Organization created. You can now sign in as the Organization Admin.",
+        "organization_id": tenant_id,
+    }
+
+
+@app.post("/signup", status_code=201)
 def signup(request: SignupRequest):
     email = request.email.strip().lower()
     if "@" not in email or email.startswith("@") or email.endswith("@"):
         raise HTTPException(status_code=422, detail="Enter a valid email address")
-    if email == settings.auth_username.lower() or get_user_by_username(email):
+    invitation = get_valid_organization_invitation(
+        hashlib.sha256(request.invitation_token.encode()).hexdigest()
+    )
+    if not invitation or not hmac.compare_digest(invitation["email"], email):
+        raise HTTPException(status_code=400, detail="This invitation is invalid or expired")
+    if email == settings.auth_username.lower() or get_user_by_email(email):
         raise HTTPException(status_code=409, detail="An account with that email already exists")
     salt = settings.auth_secret.encode()[:16].ljust(16, b"0")
-    user = create_user(username=email, password_hash=_hash_password(request.password, salt), provider="password", provider_subject=None, full_name=request.full_name.strip(), organization=request.organization.strip(), team_name=request.team_name.strip(), job_title=request.job_title.strip(), manager_email=request.manager_email.strip().lower() if request.manager_email else None)
-    return LoginResponse(access_token=create_token(subject=user["username"], user_id=user["user_id"]), is_new_user=True)
+    user = create_user(
+        username=email,
+        password_hash=_hash_password(request.password, salt),
+        provider="password",
+        provider_subject=None,
+        tenant_id=invitation["tenant_id"],
+        full_name=request.full_name.strip(),
+        organization=invitation["tenant_id"],
+        team_name=request.team_name.strip() if request.team_name else None,
+        job_title=request.job_title.strip() if request.job_title else None,
+        manager_email=request.manager_email.strip().lower() if request.manager_email else None,
+        email_verified=True,
+    )
+    accept_organization_invitation(invitation["invitation_id"])
+    _send_verification_email(email, user["user_id"])
+    return {"status": "created", "message": "Account created. You can now sign in."}
+
+
+@app.post("/auth/verify-email")
+def verify_email(token: str):
+    user_id = consume_email_verification_token(hashlib.sha256(token.encode()).hexdigest())
+    if not user_id:
+        raise HTTPException(status_code=400, detail="This verification link is invalid or expired")
+    return {"status": "verified"}
 
 
 @app.post("/login", response_model=LoginResponse)
 def login(request: LoginRequest):
     email = request.email.strip().lower()
+    user = get_user_by_email(email)
     token = authenticate(email, request.password)
     if token is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
-    user = get_user_by_username(email)
     return LoginResponse(access_token=token, must_change_password=bool(user and user.get("must_change_password")))
 
 
@@ -287,6 +394,8 @@ def super_admin_login():
             organization="DocFlow Community",
             team_name="Engineering",
             job_title="Product Explorer",
+            tenant_id=settings.dev_tenant_id,
+            email_verified=True,
         )
     # The settings-backed token resolves to an organization admin in auth.py.
     return LoginResponse(access_token=create_token(subject=settings.auth_username, user_id=settings.dev_user_id))
@@ -321,14 +430,14 @@ def google_callback(code: str, state: str, request: Request, response: Response)
     subject = identity["subject"]
     user = get_user_by_provider_subject("google", subject)
     if user is None:
-        user = get_user_by_username(identity["email"])
+        user = get_user_by_email(identity["email"])
         if user:
             link_user_provider(user["user_id"], "google", subject)
         else:
-            try:
-                user = create_user(username=identity["email"], password_hash=None, provider="google", provider_subject=subject, full_name=identity.get("name"))
-            except Exception as exc:
-                raise HTTPException(status_code=409, detail="Could not create Google account") from exc
+            raise HTTPException(
+                status_code=403,
+                detail="Google sign-in is available only for existing members. Ask an organization admin for an invitation.",
+            )
     response.delete_cookie("google_oauth_state")
     response.status_code = 303
     token = create_token(subject=user["username"], user_id=user["user_id"])
@@ -572,21 +681,21 @@ def list_projects(
     _backfill_database_from_vectors(client, user.tenant_id)
     projects = database_list_projects(user.tenant_id)
     for project in projects:
-        assigned_teams = sorted({
+        assigned_teams = sorted(set(project.get("assigned_teams", [])) | {
             member["team_name"].strip()
             for member in project.get("members", [])
             if member.get("team_name") and member["team_name"].strip()
         })
         project_role = role_for_project(user, project["project_id"])
-        if user.is_org_admin:
-            assigned_teams = []
-        elif project_role != ADMIN:
+        if not user.is_org_admin and project_role != ADMIN:
             visible_teams = set(user.team_memberships.get(project["project_id"], []))
             assigned_teams = [team for team in assigned_teams if team in visible_teams]
         project["assigned_teams"] = assigned_teams
     if user.is_org_admin:
         return projects
     return [project for project in projects if project["project_id"] in user.project_roles]
+
+
 
 
 @app.post("/projects", response_model=ProjectSummary, status_code=201)
@@ -1143,35 +1252,45 @@ def create_organization_user(
     request: CreateOrganizationUserRequest,
     admin_user: UserContext = Depends(get_current_user),
 ):
-    """Create a password-based user and email a temporary password."""
+    """Create a member account with a one-time temporary password."""
     if not admin_user.is_org_admin:
         raise HTTPException(status_code=403, detail="Only organization admins can add users")
     email = request.email.strip().lower()
-    if get_user_by_username(email):
+    if email == settings.auth_username.lower() or get_user_by_email(email):
         raise HTTPException(status_code=409, detail="An account with that email already exists")
-    temporary_password = secrets.token_urlsafe(12)
+    admin_record = get_user_by_id(admin_user.user_id)
+    organization_name = (admin_record or {}).get("organization") or "your organization"
+    temporary_password = "".join(
+        secrets.choice("ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%")
+        for _ in range(14)
+    )
     salt = settings.auth_secret.encode()[:16].ljust(16, b"0")
-    created = create_user(
+    create_user(
         username=email,
         password_hash=_hash_password(temporary_password, salt),
         provider="password",
         provider_subject=None,
+        tenant_id=admin_user.tenant_id,
         full_name=request.full_name.strip(),
-        organization=admin_user.tenant_id,
+        organization=organization_name,
         team_name=request.team_name.strip() if request.team_name else None,
-        job_title=request.job_title.strip() if request.job_title else None,
         must_change_password=True,
+        email_verified=True,
     )
-    audit_log(admin_user.tenant_id, admin_user.user_id, "CREATE_USER", "user", created["user_id"], f"email={email}")
+    audit_log(admin_user.tenant_id, admin_user.user_id, "CREATE_USER", "user", email, f"email={email}")
     from app.services.email_notifications import send_notification_email
     send_notification_email(
         email,
-        "Your DocFlow organization account",
-        f"An administrator created a DocFlow account for you.\n\n"
-        f"Email: {email}\nTemporary password: {temporary_password}\n\n"
-        "Sign in and change this password immediately.",
+        f"Welcome to {organization_name} on DocFlow",
+        f"Hello {request.full_name.strip()},\n\n"
+        f"Welcome to {organization_name}. Your DocFlow account has been created by your organization administrator.\n\n"
+        f"Sign in at: {settings.frontend_url.rstrip('/')}/login\n"
+        f"Email: {email}\n"
+        f"Temporary password: {temporary_password}\n\n"
+        "For your security, you will be asked to change this temporary password after your first sign-in.\n"
+        "Welcome to the team!",
     )
-    return {"status": "created", "user_id": created["user_id"], "email": email}
+    return {"status": "created", "email": email, "full_name": request.full_name.strip()}
 
 
 @app.delete("/admin/users/{user_id}")
@@ -1225,6 +1344,10 @@ def assign_user_access(
     target = get_user_by_username(request.email.strip().lower())
     if not target or target["tenant_id"] != admin_user.tenant_id:
         raise HTTPException(status_code=404, detail="User was not found in your organization")
+    if target["user_id"] == admin_user.user_id:
+        raise HTTPException(status_code=409, detail="Organization admins already have full access")
+    if target.get("is_org_admin") and not admin_user.is_org_admin:
+        raise HTTPException(status_code=403, detail="Only organization admins can modify organization-admin access")
     update_user_access(
         target["user_id"],
         is_org_admin=True,
@@ -1243,6 +1366,8 @@ def assign_project_access(
     target = get_user_by_username(request.email.strip().lower())
     if not target or target["tenant_id"] != admin_user.tenant_id:
         raise HTTPException(status_code=404, detail="User was not found in your organization")
+    if target["user_id"] == admin_user.user_id:
+        raise HTTPException(status_code=409, detail="Organization admins already have full access")
     if not get_project(admin_user.tenant_id, request.project_id):
         raise HTTPException(status_code=404, detail="Project was not found in your organization")
     caller_role = "org_admin" if admin_user.is_org_admin else admin_user.project_roles.get(request.project_id)
@@ -1795,6 +1920,35 @@ def ask_documents(
                 project_documents,
                 get_valid_stages(user.tenant_id),
             )
+            all_project_chunks = []
+            next_offset = None
+            while True:
+                points, next_offset = client.scroll(
+                    collection_name=collection_name(user.tenant_id),
+                    scroll_filter=access_filter,
+                    limit=256,
+                    offset=next_offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                all_project_chunks.extend(
+                    point.payload for point in points
+                    if point.payload and point.payload.get("project_id") == request.project_id
+                )
+                if next_offset is None:
+                    break
+            all_project_chunks.sort(key=lambda item: (
+                item.get("document_id", ""),
+                item.get("section_title", ""),
+                item.get("chunk_index", 0),
+            ))
+            full_project_source = "\n\n".join(
+                f"[Document: {chunk.get('document_id', 'unknown')}, "
+                f"{chunk.get('section_title', 'Unknown section')}]\n"
+                f"{chunk.get('chunk_text', '')}"
+                for chunk in all_project_chunks
+            )
+            project_context = f"{project_context}\n\nComplete project documents:\n{full_project_source}"
         answer = generate_answer(
             "You are DocFlow's General Query Agent. Gemini must handle the complete request. "
             "Treat every stage in the selected project as relevant context, not only the stage "
@@ -2142,7 +2296,13 @@ def studio_save_draft(
     user: UserContext = Depends(get_current_user),
 ):
     """Persist an approved draft to the server-side drafts/ folder."""
-    saved = save_document(request.document_text, request.document_type, request.project_stage, filename=request.filename)
+    saved = save_document(
+        request.document_text,
+        request.document_type,
+        request.project_stage,
+        filename=request.filename,
+        user_id=user.user_id,
+    )
     audit_log(user.tenant_id, user.user_id, "SAVE_DRAFT", "draft", saved["filename"], f"project={request.project_id or 'none'}")
     return SaveDraftResponse(**saved)
 
@@ -2150,7 +2310,7 @@ def studio_save_draft(
 @app.get("/studio/saved-drafts")
 def studio_saved_drafts(user: UserContext = Depends(get_current_user)):
     """List drafts saved in the local Studio drafts folder."""
-    return {"drafts": load_saved_documents()}
+    return {"drafts": load_saved_documents(user.user_id)}
 
 
 @app.get("/studio/saved-drafts/{filename}")
@@ -2159,7 +2319,12 @@ def studio_saved_draft(filename: str, user: UserContext = Depends(get_current_us
     safe_filename = Path(filename).name
     if safe_filename != filename or not safe_filename.endswith(".md"):
         raise HTTPException(status_code=400, detail="Invalid saved draft filename")
-    draft_path = Path(__file__).resolve().parents[2] / "drafts" / safe_filename
+    draft_path = (
+        Path(__file__).resolve().parents[2]
+        / "drafts"
+        / re.sub(r"[^a-zA-Z0-9_.-]+", "_", user.user_id).strip("._")
+        / safe_filename
+    )
     if not draft_path.is_file():
         raise HTTPException(status_code=404, detail="Saved draft not found")
     return PlainTextResponse(draft_path.read_text(encoding="utf-8"))
@@ -2176,35 +2341,113 @@ def studio_download_draft(
             require_action(user, request.project_id, "draft")
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
-    document = Document()
-    section = document.sections[0]
-    section.top_margin = Inches(0.75)
-    section.bottom_margin = Inches(0.75)
-    section.left_margin = Inches(0.85)
-    section.right_margin = Inches(0.85)
-    normal = document.styles["Normal"]
-    normal.font.name = "Aptos"
-    normal.font.size = Pt(10.5)
-    for line in request.document_text.splitlines():
-        stripped = line.strip()
-        if not stripped or re.fullmatch(r"[-*_ ]{3,}", stripped):
+    html_document = _draft_to_word_html(request.document_text)
+    with NamedTemporaryFile("w", suffix=".doc", delete=False, encoding="utf-8") as temporary:
+        temporary.write(html_document)
+        path = temporary.name
+    safe_type = re.sub(r"[^a-zA-Z0-9]+", "-", request.document_type).strip("-").lower() or "draft"
+    return FileResponse(path, media_type="application/msword", filename=f"{safe_type}-{request.project_stage.lower().replace(' ', '-')}.doc")
+
+
+def _draft_to_word_html(document_text: str) -> str:
+    """Create a Word-compatible document that preserves the preview's HTML layout."""
+    lines = document_text.replace("\r\n", "\n").splitlines()
+    blocks = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if not stripped:
+            index += 1
+            continue
+        if stripped.startswith("```"):
+            diagram = []
+            index += 1
+            while index < len(lines) and not lines[index].strip().startswith("```"):
+                diagram.append(lines[index])
+                index += 1
+            blocks.append(f'<pre class="diagram">{html.escape(chr(10).join(diagram).strip())}</pre>')
+            index += 1
+            continue
+        separator_index = index + 1
+        while separator_index < len(lines) and not lines[separator_index].strip():
+            separator_index += 1
+        if _is_markdown_table_row(stripped) and separator_index < len(lines) and _is_markdown_table_separator(lines[separator_index].strip()):
+            headers = _markdown_table_cells(stripped)
+            rows = []
+            index = separator_index + 1
+            while index < len(lines):
+                if not lines[index].strip():
+                    index += 1
+                    continue
+                if not _is_markdown_table_row(lines[index].strip()):
+                    break
+                rows.append(_markdown_table_cells(lines[index].strip()))
+                index += 1
+            header_html = "".join(f"<th>{_inline_word_html(value)}</th>" for value in headers)
+            row_html = "".join(
+                "<tr>" + "".join(
+                    f"<td>{_inline_word_html(values[column] if column < len(values) else '')}</td>"
+                    for column in range(len(headers))
+                ) + "</tr>"
+                for values in rows
+            )
+            blocks.append(f'<table><thead><tr>{header_html}</tr></thead><tbody>{row_html}</tbody></table>')
             continue
         if stripped.startswith("#"):
             level = min(len(stripped) - len(stripped.lstrip("#")), 3)
-            paragraph = document.add_heading(stripped[level:].strip().replace("**", ""), level=level)
+            blocks.append(f"<h{level}>{_inline_word_html(stripped[level:].strip())}</h{level}>")
         elif re.match(r"^[-*]\s+", stripped):
-            paragraph = document.add_paragraph(re.sub(r"^[-*]\s+", "", stripped), style="List Bullet")
+            blocks.append(f"<p class=\"bullet\">{_inline_word_html(re.sub(r'^[-*]\s+', '', stripped))}</p>")
         elif re.match(r"^\d+\.\s+", stripped):
-            paragraph = document.add_paragraph(re.sub(r"^\d+\.\s+", "", stripped), style="List Number")
+            blocks.append(f"<p class=\"numbered\">{_inline_word_html(re.sub(r'^\d+\.\s+', '', stripped))}</p>")
         else:
-            paragraph = document.add_paragraph(stripped)
-        for run in paragraph.runs:
-            run.text = run.text.replace("**", "").replace("__", "")
-    with NamedTemporaryFile(suffix=".docx", delete=False) as temporary:
-        document.save(temporary.name)
-        path = temporary.name
-    safe_type = re.sub(r"[^a-zA-Z0-9]+", "-", request.document_type).strip("-").lower() or "draft"
-    return FileResponse(path, media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document", filename=f"{safe_type}-{request.project_stage.lower().replace(' ', '-')}.docx")
+            blocks.append(f"<p>{_inline_word_html(stripped)}</p>")
+        index += 1
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+@page {{ margin: 0.75in 0.85in; }}
+body {{ font-family: Aptos, Arial, sans-serif; font-size: 10.5pt; color: #111827; line-height: 1.45; }}
+h1 {{ font-size: 22pt; margin: 0 0 18pt; border-bottom: 2px solid #111827; padding-bottom: 8pt; }}
+h2 {{ font-size: 15pt; margin: 20pt 0 6pt; border-bottom: 1px solid #d1d5db; padding-bottom: 3pt; }}
+h3 {{ font-size: 12pt; margin: 14pt 0 5pt; }}
+p {{ margin: 0 0 8pt; }}
+.bullet {{ margin-left: 18pt; text-indent: -10pt; }}
+.bullet:before {{ content: "• "; }}
+.numbered {{ margin-left: 20pt; text-indent: -12pt; }}
+table {{ width: 100%; border-collapse: collapse; margin: 12pt 0 16pt; table-layout: auto; }}
+th, td {{ border: 1px solid #9ca3af; padding: 6pt 8pt; vertical-align: top; text-align: left; }}
+th {{ background: #d9eaf7; font-weight: bold; }}
+tr:nth-child(even) td {{ background: #f9fafb; }}
+.diagram {{ white-space: pre; font-family: Consolas, "Courier New", monospace; font-size: 9pt; background: #f3f4f6; border: 1px solid #9ca3af; padding: 10pt; margin: 12pt 0 16pt; }}
+code {{ font-family: Consolas, "Courier New", monospace; }}
+</style>
+</head>
+<body>{''.join(blocks)}</body>
+</html>"""
+
+
+def _inline_word_html(text: str) -> str:
+    escaped = html.escape(text)
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
+    escaped = re.sub(r"__(.+?)__", r"<strong>\1</strong>", escaped)
+    return re.sub(r"`(.+?)`", r"<code>\1</code>", escaped)
+
+
+def _markdown_table_cells(line: str) -> list[str]:
+    return [html.unescape(cell).strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _is_markdown_table_row(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and len(_markdown_table_cells(line)) >= 2
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    return _is_markdown_table_row(line) and all(
+        re.fullmatch(r":?-{3,}:?", cell.strip()) for cell in _markdown_table_cells(line)
+    )
 
 
 def _group_openapi_routes() -> None:

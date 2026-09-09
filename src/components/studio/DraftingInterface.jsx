@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Check, Sparkles, ScanSearch, Save, Download } from 'lucide-react';
 import Button from '../ui/Button';
 import Textarea from '../ui/Textarea';
 import Dropdown from '../ui/Dropdown';
 import Badge from '../ui/Badge';
-import { API_BASE, studioApi } from '../../lib/api';
+import { API_BASE, documentsApi, projectsApi, studioApi } from '../../lib/api';
 import { STAGES } from '../../constants/stages';
 
 const TEMPLATE_META = {
@@ -18,23 +18,95 @@ const TEMPLATE_META = {
 const stageOptions = STAGES.map((s) => ({ label: s, value: s }));
 
 const cleanInlineMarkdown = (line) => line
+  .replace(/&amp;/g, '&')
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
   .replace(/\*\*(.*?)\*\*/g, '$1')
   .replace(/__(.*?)__/g, '$1')
   .replace(/`([^`]+)`/g, '$1')
   .trim();
 
-const renderDraftLines = (lines, offset = 0) => lines.map((line, index) => {
-  const absoluteIndex = offset + index;
-  const key = `${absoluteIndex}-${line}`;
-  if (/^\s*([-*_])\s*\1\s*\1\s*$/.test(line)) return <div key={key} className="h-4" />;
-  if (/^###\s+/.test(line)) return <h3 key={key} className="mt-5 text-base font-semibold text-gray-900">{line.replace(/^###\s+/, '')}</h3>;
-  if (/^##\s+/.test(line)) return <h2 key={key} className="mt-7 border-b border-gray-200 pb-1 text-lg font-semibold text-gray-900">{cleanInlineMarkdown(line.replace(/^##\s+/, ''))}</h2>;
-  if (/^#\s+/.test(line)) return <h1 key={key} className="mb-6 border-b-2 border-gray-900 pb-3 text-2xl font-bold text-gray-950">{cleanInlineMarkdown(line.replace(/^#\s+/, ''))}</h1>;
-  if (/^[-*]\s+/.test(line)) return <li key={key} className="ml-5 list-disc pl-1">{cleanInlineMarkdown(line.replace(/^[-*]\s+/, ''))}</li>;
-  if (/^\d+\.\s+/.test(line)) return <li key={key} className="ml-5 list-decimal pl-1">{cleanInlineMarkdown(line.replace(/^\d+\.\s+/, ''))}</li>;
-  if (!line.trim()) return <div key={key} className="h-3" />;
-  return <p key={key} className="leading-6">{cleanInlineMarkdown(line)}</p>;
-});
+const tableCells = (line) => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map((cell) => cleanInlineMarkdown(cell));
+const isTableSeparator = (line) => tableCells(line).length > 0 && tableCells(line).every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+const isTableRow = (line) => /^\s*\|.*\|\s*$/.test(line) && line.split('|').length >= 3;
+
+const renderDraftLines = (lines) => {
+  const blocks = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const key = `${index}-${line}`;
+
+    if (/^\s*```/.test(line)) {
+      const language = line.replace(/^\s*```/, '').trim();
+      const code = [];
+      index += 1;
+      while (index < lines.length && !/^\s*```/.test(lines[index])) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(
+        <pre key={key} className="my-4 overflow-x-auto rounded-lg border border-gray-300 bg-gray-900 p-4 text-xs leading-5 text-gray-100">
+          <code data-language={language || undefined}>{code.join('\n')}</code>
+        </pre>,
+      );
+      index += 1;
+      continue;
+    }
+
+    if (isTableRow(line) && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      const headers = tableCells(line);
+      const rows = [];
+      index += 2;
+      while (index < lines.length) {
+        if (!lines[index].trim()) {
+          index += 1;
+          continue;
+        }
+        if (!isTableRow(lines[index]) || isTableSeparator(lines[index])) break;
+        rows.push(tableCells(lines[index]));
+        index += 1;
+      }
+      blocks.push(
+        <div key={key} className="my-5 overflow-x-auto rounded-lg border border-gray-300">
+          <table className="min-w-full border-collapse text-left text-sm">
+            <thead className="bg-gray-100">
+              <tr>{headers.map((cell, cellIndex) => <th key={`${key}-h-${cellIndex}`} className="border-b border-gray-300 px-3 py-2 font-semibold">{cell}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((row, rowIndex) => (
+                <tr key={`${key}-r-${rowIndex}`} className="even:bg-gray-50">
+                  {headers.map((_, cellIndex) => <td key={`${key}-${rowIndex}-${cellIndex}`} className="border-b border-gray-200 px-3 py-2 align-top">{row[cellIndex] || ''}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
+      continue;
+    }
+
+    if (/^\s*([-*_])\s*\1\s*\1\s*$/.test(line)) {
+      blocks.push(<div key={key} className="h-4" />);
+    } else if (/^###\s+/.test(line)) {
+      blocks.push(<h3 key={key} className="mt-5 text-base font-semibold text-gray-900">{cleanInlineMarkdown(line.replace(/^###\s+/, ''))}</h3>);
+    } else if (/^##\s+/.test(line)) {
+      blocks.push(<h2 key={key} className="mt-7 border-b border-gray-200 pb-1 text-lg font-semibold text-gray-900">{cleanInlineMarkdown(line.replace(/^##\s+/, ''))}</h2>);
+    } else if (/^#\s+/.test(line)) {
+      blocks.push(<h1 key={key} className="mb-6 border-b-2 border-gray-900 pb-3 text-2xl font-bold text-gray-950">{cleanInlineMarkdown(line.replace(/^#\s+/, ''))}</h1>);
+    } else if (/^[-*]\s+/.test(line)) {
+      blocks.push(<li key={key} className="ml-5 list-disc pl-1">{cleanInlineMarkdown(line.replace(/^[-*]\s+/, ''))}</li>);
+    } else if (/^\d+\.\s+/.test(line)) {
+      blocks.push(<li key={key} className="ml-5 list-decimal pl-1">{cleanInlineMarkdown(line.replace(/^\d+\.\s+/, ''))}</li>);
+    } else if (!line.trim()) {
+      blocks.push(<div key={key} className="h-3" />);
+    } else {
+      blocks.push(<p key={key} className="leading-6">{cleanInlineMarkdown(line)}</p>);
+    }
+    index += 1;
+  }
+  return blocks;
+};
 
 const DraftingInterface = () => {
   const { projectId, templateId } = useParams();
@@ -51,8 +123,24 @@ const DraftingInterface = () => {
 
   const [isSaving, setIsSaving] = useState(false);
   const [savedPath, setSavedPath] = useState(null);
+  const [savedDrafts, setSavedDrafts] = useState([]);
+  const [isDraftsOpen, setIsDraftsOpen] = useState(false);
+  const [isLoadingDrafts, setIsLoadingDrafts] = useState(false);
   const [isLoadingSaved, setIsLoadingSaved] = useState(false);
+  const [isUploadingProject, setIsUploadingProject] = useState(false);
+  const [projectName, setProjectName] = useState('');
   const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (projectId) {
+      projectsApi.list()
+        .then((items) => {
+          const project = items.find((item) => item.project_id === projectId);
+          setProjectName(project?.project_name || projectId);
+        })
+        .catch(() => setProjectName(projectId));
+    }
+  }, [projectId]);
 
   const handleGenerate = async () => {
     if (!instructions.trim()) return;
@@ -114,6 +202,9 @@ const DraftingInterface = () => {
         project_id: projectId || null,
       });
       setSavedPath(result.filename);
+      setSavedDrafts((current) => current.includes(result.filename)
+        ? current
+        : [result.filename, ...current]);
     } catch (err) {
       setError(err.message || 'Could not save the draft.');
     } finally {
@@ -121,17 +212,59 @@ const DraftingInterface = () => {
     }
   };
 
-  const handleViewSaved = async () => {
-    if (!savedPath) return;
+  const handleViewSaved = async (filename = savedPath) => {
+    if (!filename) return;
+    setSavedPath(filename);
     setIsLoadingSaved(true);
     setError('');
     try {
-      const savedContent = await studioApi.savedDraft(savedPath);
+      const savedContent = await studioApi.savedDraft(filename);
       setDraft(savedContent);
+      setDraftStage(stage);
+      setInstructions('');
     } catch (err) {
       setError(err.message || 'Could not open the saved draft.');
     } finally {
       setIsLoadingSaved(false);
+    }
+  };
+
+  const handleOpenDrafts = async () => {
+    setIsDraftsOpen((current) => !current);
+    if (savedDrafts.length) return;
+
+    setIsLoadingDrafts(true);
+    setError('');
+    try {
+      const result = await studioApi.savedDrafts();
+      setSavedDrafts(result.drafts || []);
+    } catch (err) {
+      setError(err.message || 'Could not load saved drafts.');
+    } finally {
+      setIsLoadingDrafts(false);
+    }
+  };
+
+  const handleUploadToProject = async () => {
+    if (!draft || !projectId) return;
+    setIsUploadingProject(true);
+    setError('');
+    try {
+      const filename = savedPath || `${meta.docType.toLowerCase().replace(/\s+/g, '-')}-${stage.toLowerCase().replace(/\s+/g, '-')}.md`;
+      const formData = new FormData();
+      formData.append('file', new Blob([draft], { type: 'text/markdown' }), filename);
+      formData.append('project_id', projectId);
+      formData.append('project_name', projectName || projectId);
+      formData.append('stage', stage);
+      formData.append('doc_type', meta.docType);
+      formData.append('visible_to_teams', '');
+      formData.append('sensitivity_level', '1');
+      await documentsApi.upload(formData);
+      setSavedPath((current) => current || filename);
+    } catch (err) {
+      setError(err.message || 'Could not upload the draft to the project.');
+    } finally {
+      setIsUploadingProject(false);
     }
   };
 
@@ -225,6 +358,40 @@ const DraftingInterface = () => {
               {savedPath ? <><Check size={16} className="mr-1" /> Saved</> : <><Save size={14} className="mr-1" /> Save Draft</>}
             </Button>
           )}
+          <div className="relative">
+            <Button size="sm" variant="secondary" onClick={handleOpenDrafts} loading={isLoadingDrafts}>
+              Drafts
+            </Button>
+            {isDraftsOpen && (
+              <div className="absolute right-0 top-10 z-20 w-64 rounded-lg border border-border bg-surface p-2 shadow-xl">
+                <p className="px-2 py-1 text-xs font-medium text-gray-400">Saved drafts</p>
+                {savedDrafts.length ? (
+                  <div className="max-h-56 overflow-y-auto">
+                    {savedDrafts.map((filename) => (
+                      <button
+                        key={filename}
+                        type="button"
+                        className="block w-full rounded-md px-2 py-2 text-left text-xs text-gray-300 hover:bg-surface-hover hover:text-white"
+                        onClick={() => {
+                          setIsDraftsOpen(false);
+                          handleViewSaved(filename);
+                        }}
+                      >
+                        {filename}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="px-2 py-2 text-xs text-gray-500">No saved drafts yet.</p>
+                )}
+              </div>
+            )}
+          </div>
+          {draft && projectId && (
+            <Button size="sm" variant="secondary" onClick={handleUploadToProject} loading={isUploadingProject}>
+              Upload to Project
+            </Button>
+          )}
           {draft && (
             <Button size="sm" variant="secondary" icon={Download} onClick={handleDownloadWord}>
               Download Word
@@ -264,9 +431,11 @@ const DraftingInterface = () => {
             {savedPath && (
               <div className="mt-3 flex flex-col items-center gap-2">
                 <p className="text-emerald-400 text-sm text-center">Saved to backend/drafts/{savedPath}</p>
-                <Button size="sm" variant="secondary" onClick={handleViewSaved} loading={isLoadingSaved}>
-                  View Saved Draft
-                </Button>
+                {projectId && (
+                  <Button size="sm" variant="secondary" onClick={handleUploadToProject} loading={isUploadingProject}>
+                    Upload to Project
+                  </Button>
+                )}
               </div>
             )}
           </div>

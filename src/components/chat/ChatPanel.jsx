@@ -9,6 +9,36 @@ const SUGGESTIONS = [
   'What is still missing or unclear?',
 ];
 
+const cleanInlineMarkdown = (value) => value
+  .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+  .replace(/`([^`]+)`/g, '$1')
+  .replace(/\*\*([^*]+)\*\*/g, '$1')
+  .replace(/__([^_]+)__/g, '$1')
+  .replace(/[*_~]/g, '');
+
+const StructuredResponse = ({ text }) => {
+  const lines = String(text || '').split(/\r?\n/);
+  return (
+    <div className="space-y-2 leading-6">
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) return <div key={index} className="h-1" />;
+        if (/^#{1,6}\s+/.test(trimmed)) {
+          const heading = trimmed.replace(/^#{1,6}\s+/, '');
+          return <h4 key={index} className="pt-2 text-sm font-semibold text-gray-100">{cleanInlineMarkdown(heading)}</h4>;
+        }
+        if (/^[-*+]\s+/.test(trimmed)) {
+          return <li key={index} className="ml-5 list-disc pl-1">{cleanInlineMarkdown(trimmed.replace(/^[-*+]\s+/, ''))}</li>;
+        }
+        if (/^\d+[.)]\s+/.test(trimmed)) {
+          return <li key={index} className="ml-5 list-decimal pl-1">{cleanInlineMarkdown(trimmed.replace(/^\d+[.)]\s+/, ''))}</li>;
+        }
+        return <p key={index}>{cleanInlineMarkdown(trimmed)}</p>;
+      })}
+    </div>
+  );
+};
+
 const ChatPanel = ({ projectId, mode = 'query' }) => {
   const [messages, setMessages] = useState([]);
   const [sessions, setSessions] = useState([]);
@@ -32,15 +62,11 @@ const ChatPanel = ({ projectId, mode = 'query' }) => {
     setMessages([]);
     setSessionId(null);
     chatApi.sessions(projectId, mode)
-      .then((items) => {
-        if (cancelled) return;
-        setSessions(items);
-        if (items[0]) {
-          setSessionId(items[0].session_id);
-          return chatApi.messages(items[0].session_id);
-        }
-        return [];
-      })
+    .then((items) => {
+      if (cancelled) return;
+      setSessions(items);
+      return [];
+    })
       .then((items) => {
         if (!cancelled && items) setMessages(items.map((item) => ({
           id: item.message_id,
@@ -239,7 +265,7 @@ const ChatPanel = ({ projectId, mode = 'query' }) => {
                   {msg.sender === 'user' ? <User size={16} /> : <Bot size={16} />}
                 </div>
                 <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${msg.sender === 'user' ? 'bg-primary text-white rounded-tr-sm' : msg.isError ? 'bg-red-500/10 border border-red-500/30 text-red-300 rounded-tl-sm' : 'bg-surface border border-border text-gray-200 rounded-tl-sm'}`}>
-                  <p className="whitespace-pre-wrap">{msg.text}</p>
+                  <StructuredResponse text={msg.text} />
                   {msg.sources && msg.sources.length > 0 && (
                     <div className="mt-3 pt-3 border-t border-border/50 space-y-1.5">
                       <p className="text-xs text-gray-500 uppercase tracking-wide">Sources</p>

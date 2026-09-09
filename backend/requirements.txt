@@ -13,6 +13,7 @@ python-dotenv>=1.0.0
 # and /studio/* routes even when the deterministic fallback path is used.
 agno>=3.0.0
 groq>=1.0.0
+google-genai>=1.0.0
 
 # Embeddings / reranking (uncomment what you settle on)
 # sentence-transformers>=2.6.0      # for BGE dense + bge-reranker cross-encoder

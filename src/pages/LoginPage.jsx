@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router-dom';
 import { Sparkles } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -16,15 +16,28 @@ const GoogleIcon = (props) => (
 );
 
 const LoginPage = () => {
-  const { isAuthenticated, login, signup, loginSuperAdmin, loginWithGoogle } = useAuth();
+  const { isAuthenticated, login, signup, loginWithGoogle } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const resetToken = searchParams.get('reset_token');
-  const [mode, setMode] = useState(resetToken ? 'reset' : 'login'); // login | signup | forgot | reset
+  const inviteToken = searchParams.get('invite_token');
+  const verifyToken = searchParams.get('verify_token');
+  const [mode, setMode] = useState(resetToken ? 'reset' : inviteToken ? 'signup' : 'login'); // login | signup | organization | forgot | reset
   const [form, setForm] = useState({
-    email: '', password: '', full_name: '', organization: '', team_name: '', job_title: '',
+    email: '', password: '', full_name: '', team_name: '', job_title: '', organization_name: '',
   });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!verifyToken) return;
+    authApi.verifyEmail(verifyToken)
+      .then(() => setError('Email verified. You can now sign in.'))
+      .catch((err) => setError(err.detail?.detail || err.message || 'Verification link is invalid or expired.'))
+      .finally(() => {
+        searchParams.delete('verify_token');
+        setSearchParams(searchParams);
+      });
+  }, [verifyToken, searchParams, setSearchParams]);
 
   if (isAuthenticated) return <Navigate to="/" replace />;
 
@@ -38,7 +51,15 @@ const LoginPage = () => {
       if (mode === 'login') {
         await login(form.email, form.password);
       } else if (mode === 'signup') {
-        await signup(form);
+        await signup({ ...form, invitation_token: inviteToken });
+        setMode('login');
+        setError('Account created. You can now sign in.');
+        searchParams.delete('invite_token');
+        setSearchParams(searchParams);
+      } else if (mode === 'organization') {
+        await authApi.signupOrganization(form);
+        setMode('login');
+        setError('Organization created. You can now sign in as the Organization Admin.');
       } else if (mode === 'forgot') {
         await authApi.forgotPassword(form.email);
         setError('If an account exists, a password-reset email has been sent.');
@@ -50,18 +71,6 @@ const LoginPage = () => {
       }
     } catch (err) {
       setError(err.detail?.detail || err.message || 'Something went wrong.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleSuperAdmin = async () => {
-    setError('');
-    setBusy(true);
-    try {
-      await loginSuperAdmin();
-    } catch (err) {
-      setError(err.message || 'Could not start super-admin access.');
     } finally {
       setBusy(false);
     }
@@ -89,14 +98,18 @@ const LoginPage = () => {
 
         <div className="bg-surface border border-border rounded-xl p-6 shadow-lg shadow-black/20">
           <form onSubmit={handleSubmit} className="space-y-4">
+            {mode === 'organization' && (
+              <>
+                <Input label="Organization name" required value={form.organization_name} onChange={update('organization_name')} placeholder="Deloitte" />
+                <Input label="Your full name" required value={form.full_name} onChange={update('full_name')} placeholder="Apurv Jha" />
+                <Input label="Job title" value={form.job_title} onChange={update('job_title')} placeholder="Organization Admin" />
+              </>
+            )}
             {mode === 'signup' && (
               <>
-                <Input label="Full name" required value={form.full_name} onChange={update('full_name')} placeholder="Jane Doe" />
-                <div className="grid grid-cols-2 gap-3">
-                  <Input label="Organization" required value={form.organization} onChange={update('organization')} placeholder="Acme Inc" />
-                  <Input label="Team" required value={form.team_name} onChange={update('team_name')} placeholder="Engineering" />
-                </div>
-                <Input label="Job title" required value={form.job_title} onChange={update('job_title')} placeholder="Product Manager" />
+                <Input label="Full name" required value={form.full_name} onChange={update('full_name')} />
+                <Input label="Team" value={form.team_name} onChange={update('team_name')} placeholder="Engineering" />
+                <Input label="Job title" value={form.job_title} onChange={update('job_title')} placeholder="Product Manager" />
               </>
             )}
             <Input label="Email" type="email" required value={form.email} onChange={update('email')} placeholder="you@company.com" />
@@ -105,7 +118,7 @@ const LoginPage = () => {
             {error && <p className="text-sm text-red-400">{error}</p>}
 
             <Button type="submit" className="w-full" loading={busy}>
-              {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send reset link' : 'Reset password'}
+              {mode === 'login' ? 'Sign in' : mode === 'signup' ? 'Create account' : mode === 'organization' ? 'Create organization' : mode === 'forgot' ? 'Send reset link' : 'Reset password'}
             </Button>
           </form>
 
@@ -125,27 +138,37 @@ const LoginPage = () => {
               <GoogleIcon className="mr-2" />
               Continue with Google
             </Button>
-            <Button type="button" variant="ghost" className="w-full" onClick={handleSuperAdmin} loading={busy}>
-              Continue as Super Admin
-            </Button>
           </div>}
           {mode === 'login' && (
             <button type="button" className="mt-4 w-full text-sm text-primary-light hover:underline" onClick={() => { setError(''); setMode('forgot'); }}>
               Forgot password?
             </button>
           )}
+          {mode === 'organization' && (
+            <button
+              type="button"
+              className="w-full text-sm text-primary-light hover:underline"
+              onClick={() => { setError(''); setMode('login'); }}
+            >
+              Already have an account? Sign in
+            </button>
+          )}
         </div>
 
-        <p className="text-center text-sm text-gray-500 mt-6">
-          {mode === 'login' || mode === 'forgot' || mode === 'reset' ? "Don't have an account? " : 'Already have an account? '}
+        {mode === 'login' && (
           <button
             type="button"
-            className="text-primary-light hover:underline"
-            onClick={() => { setError(''); setMode(mode === 'signup' ? 'login' : 'signup'); }}
+            className="mt-6 block w-full rounded-xl border border-primary/30 bg-primary/5 p-4 text-center transition hover:border-primary/50 hover:bg-primary/10 focus:outline-none focus:ring-2 focus:ring-primary/50 focus:ring-offset-2 focus:ring-offset-background"
+            onClick={() => { setError(''); setMode('organization'); }}
           >
-            {mode === 'signup' ? 'Sign in' : 'Sign up'}
+            <p className="text-sm font-medium text-gray-200">Create a new organization</p>
           </button>
-        </p>
+        )}
+        {mode === 'signup' && (
+          <p className="text-center text-sm text-gray-500 mt-6">
+            Use the invitation link sent by your organization administrator.
+          </p>
+        )}
         </div>
       </div>
     </div>

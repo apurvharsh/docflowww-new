@@ -17,7 +17,6 @@ const ProjectWorkspace = () => {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [memberSearch, setMemberSearch] = useState('');
 
   const [gapReport, setGapReport] = useState(null);
   const [gapLoading, setGapLoading] = useState(false);
@@ -62,17 +61,6 @@ const ProjectWorkspace = () => {
   const canManageAccess = user?.is_org_admin || role === 'admin' || role === 'team_lead';
   const pendingCount = documents.filter((document) => document.workflow_state === 'pending_review').length;
   const approvedCount = documents.filter((document) => document.workflow_state === 'approved').length;
-  const memberNames = project?.members?.map((member) => member.name || member.username).filter(Boolean) || [];
-  const matchingMembers = project?.members?.filter((member) => {
-    const query = memberSearch.trim().toLowerCase();
-    if (!query) return false;
-    return [member.name, member.username, member.team_name, member.role]
-      .filter(Boolean)
-      .some((value) => value.toLowerCase().includes(query));
-  }) || [];
-  const memberSearchPlaceholder = memberNames.length
-    ? `Search members: ${memberNames.slice(0, 2).join(', ')}${memberNames.length > 2 ? ', ...' : ''}`
-    : 'Search project members';
 
   if (loading) {
     return (
@@ -109,31 +97,6 @@ const ProjectWorkspace = () => {
         <div className="hidden xl:flex items-center gap-2">
           <Badge variant="success">{approvedCount} approved</Badge>
           {pendingCount > 0 && <Badge variant="warning">{pendingCount} pending review</Badge>}
-        </div>
-        <div className="relative w-40 sm:w-52 shrink-0">
-          <SearchIcon size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-          <input
-            type="search"
-            value={memberSearch}
-            onChange={(event) => setMemberSearch(event.target.value)}
-            placeholder={memberSearchPlaceholder}
-            aria-label="Search project members"
-            className="w-full rounded-lg border border-border bg-surface py-2 pl-9 pr-3 text-xs text-gray-200 placeholder:text-gray-600 focus:border-primary focus:outline-none"
-          />
-          {memberSearch.trim() && (
-            <div className="absolute right-0 top-full z-20 mt-2 w-72 rounded-lg border border-border bg-surface p-2 shadow-xl">
-              {matchingMembers.length > 0 ? matchingMembers.map((member) => (
-                <div key={member.user_id} className="rounded-md px-3 py-2 hover:bg-background">
-                  <p className="text-sm text-gray-200">{member.name || member.username}</p>
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    {member.role || 'Member'}{member.team_name ? ` · ${member.team_name}` : ''}
-                  </p>
-                </div>
-              )) : (
-                <p className="px-3 py-2 text-xs text-gray-500">No project members found.</p>
-              )}
-            </div>
-          )}
         </div>
         <div className="flex-1" />
         {canManageAccess && (

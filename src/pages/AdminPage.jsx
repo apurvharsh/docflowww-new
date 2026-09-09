@@ -246,7 +246,7 @@ const UsersTab = ({ projects, currentUser, initialProjectId = '' }) => {
         full_name: newUserName.trim(),
         team_name: newUserTeam.trim() || null,
       });
-      setNotice(`${email.trim()} was added to the organization.`);
+      setNotice(`${newUserName.trim()} was added to the organization and sent a welcome email.`);
       setEmail('');
       setNewUserName('');
       setNewUserTeam('');
@@ -391,7 +391,7 @@ const UsersTab = ({ projects, currentUser, initialProjectId = '' }) => {
         </div>
       </Modal>
 
-      {canManageOrganization && <Card title="Add organization user" description="Create a login for a new member. A temporary password will be emailed to them.">
+      {canManageOrganization && <Card title="Add organization user" description="Create the account and send the member a welcome email with a temporary password.">
         <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
           <Input label="Email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="new.user@company.com" />
           <Input label="Full name" value={newUserName} onChange={(e) => setNewUserName(e.target.value)} placeholder="New user" />
@@ -445,27 +445,33 @@ const UsersTab = ({ projects, currentUser, initialProjectId = '' }) => {
               return [u.full_name, u.username, u.team_name]
                 .filter(Boolean)
                 .some((value) => value.toLowerCase().includes(query));
-            }).filter((u) => isOrgAdmin || u.user_id !== currentUser?.user_id).map((u) => (
+            }).filter((u) => u.user_id !== currentUser?.user_id).map((u) => (
               <div key={u.user_id} className="py-5 space-y-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <button
-                      type="button"
-                      onClick={() => setExpandedUserId((current) => current === u.user_id ? null : u.user_id)}
-                      aria-expanded={expandedUserId === u.user_id}
-                      className="text-left text-base font-semibold text-primary-light underline decoration-primary/50 underline-offset-4 hover:text-primary transition-colors"
-                    >
-                      {u.full_name || u.username}
-                    </button>
-                    <p className="text-sm text-gray-500 mt-1">{u.username}</p>
-                    <div className="mt-2">
-                      <Badge variant={u.team_name ? 'active' : 'inactive'}>
-                        Current team: {u.team_name || 'Not assigned'}
-                      </Badge>
-                    </div>
+                    {(!isOrgAdmin && u.is_org_admin) ? (
+                      <span className="text-base font-semibold text-gray-200">{u.full_name || u.username}</span>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setExpandedUserId((current) => current === u.user_id ? null : u.user_id)}
+                          aria-expanded={expandedUserId === u.user_id}
+                          className="text-left text-base font-semibold text-primary-light underline decoration-primary/50 underline-offset-4 hover:text-primary transition-colors"
+                        >
+                          {u.full_name || u.username}
+                        </button>
+                        <p className="text-sm text-gray-500 mt-1">{u.username}</p>
+                        <div className="mt-2">
+                          <Badge variant={u.team_name ? 'active' : 'inactive'}>
+                            Current team: {u.team_name || 'Not assigned'}
+                          </Badge>
+                        </div>
+                      </>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
-                    {projects.some((project) => canAssignProject(project.project_id)) && (
+                    {(isOrgAdmin || !u.is_org_admin) && projects.some((project) => canAssignProject(project.project_id)) && (
                       <Button size="sm" variant="secondary" onClick={() => openProjectAssignment(u.username)} loading={busy}>
                         {isOrgAdmin ? 'Assign project' : isTeamLead ? 'Add to team' : 'Assign team role'}
                       </Button>
@@ -483,7 +489,7 @@ const UsersTab = ({ projects, currentUser, initialProjectId = '' }) => {
                     ))}
                   </div>
                 </div>
-                {expandedUserId === u.user_id && (
+                {(isOrgAdmin || !u.is_org_admin) && expandedUserId === u.user_id && (
                   <div className="rounded-lg border border-border/70 bg-background/40 overflow-x-auto">
                     <table className="w-full min-w-[520px] text-left">
                       <caption className="px-3 py-2 border-b border-border/50 text-left text-xs font-semibold uppercase tracking-wider text-gray-500">

@@ -37,7 +37,10 @@ def create_drafting_agent() -> Agent:
             "3. If the user gives a template preference, use it.\n"
             "4. Use the generate_draft tool to create the draft; never invent a draft without calling the tool.\n"
             "5. For edits, use the full current content and the user's change request to redraft.\n"
-            "6. When the user explicitly approves, mark the draft ready for scanning."
+            "6. The drafting service is not the project subject. Never put the service or "
+            "provider name in the generated document title or body; write only about the "
+            "project described by the user.\n"
+            "7. When the user explicitly approves, mark the draft ready for scanning."
         ),
     )
 

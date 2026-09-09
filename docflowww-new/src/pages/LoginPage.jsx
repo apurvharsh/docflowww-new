@@ -91,9 +91,9 @@ const LoginPage = () => {
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'signup' && (
               <>
-                <Input label="Full name" required value={form.full_name} onChange={update('full_name')} placeholder="Jane Doe" />
+                <Input label="Full name" required value={form.full_name} onChange={update('full_name')} />
                 <div className="grid grid-cols-2 gap-3">
-                  <Input label="Organization" required value={form.organization} onChange={update('organization')} placeholder="Acme Inc" />
+                  <Input label="Organization" required value={form.organization} onChange={update('organization')} />
                   <Input label="Team" required value={form.team_name} onChange={update('team_name')} placeholder="Engineering" />
                 </div>
                 <Input label="Job title" required value={form.job_title} onChange={update('job_title')} placeholder="Product Manager" />

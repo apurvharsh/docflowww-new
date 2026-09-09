@@ -47,9 +47,7 @@ export const AuthProvider = ({ children }) => {
   };
 
   const signup = async (data) => {
-    const { access_token } = await authApi.signup(data);
-    setToken(access_token);
-    await loadUser();
+    return authApi.signup(data);
   };
 
   const loginSuperAdmin = async () => {

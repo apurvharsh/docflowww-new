@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from agno.agent import Agent
-from agno.models.google import Gemini
+from agno.models.google import 
 
 from app.config import settings
 from app.services.document_workflow import extract_document_context, reform_document, score_document
@@ -19,9 +19,9 @@ def create_scanner_agent() -> Agent:
             "provided scoring tool, never invent scores or criterion results, and "
             "request a reform only when the actual score is below the threshold."
         ),
-        model=Gemini(
-            id=settings.gemini_generation_model,
-            api_key=settings.gemini_api_key,
+        model=(
+            id=settings._generation_model,
+            api_key=settings._api_key,
         ),
         tools=[score_document_tool, reform_document_tool],
         instructions=(
@@ -91,7 +91,7 @@ def run_scanning_agent(message: str, state: dict | None = None) -> dict:
         result = {
             "response": (
                 "Scanner Agent provider call failed; the local scoring tool result "
-                "was used instead. Retry to use the configured Gemini model.\n"
+                "was used instead. Retry to use the configured  model.\n"
                 f"Provider error: {exc}"
             ),
             "tools": [],

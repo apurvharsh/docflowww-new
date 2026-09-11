@@ -31,7 +31,7 @@ On first launch it creates `backend/docflow.db` (SQLite), `backend/uploads/`,
 
 - **Demo**: `POST /auth/demo` — instant admin-level token, no setup required.
 - **Email/password**: `POST /auth/signup` then `POST /auth/login`.
-- **Google**: configure `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in `.env`,
+- **Google**: configure `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET` in ``,
   then hit `GET /auth/google/start` (the frontend's "Continue with Google"
   button does this). See `.env.example` for the exact redirect URI to register
   in Google Cloud Console.

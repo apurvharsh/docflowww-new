@@ -17,6 +17,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from tempfile import NamedTemporaryFile
+from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -98,9 +99,10 @@ initialize_database()
 # The React SPA (Vite dev server / built bundle) runs on a different origin
 # than this API, so it needs an explicit CORS allowance. Bearer tokens are
 # sent via the Authorization header (not cookies), so credentials aren't needed.
+frontend_origin = "{}://{}".format(urlsplit(settings.frontend_url).scheme, urlsplit(settings.frontend_url).netloc)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=sorted({settings.frontend_url, "http://localhost:5173", "http://127.0.0.1:5173"}),
+    allow_origins=sorted({frontend_origin, "http://localhost:5173", "http://127.0.0.1:5173"}),
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],

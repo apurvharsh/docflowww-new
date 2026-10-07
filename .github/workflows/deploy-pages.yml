@@ -32,6 +32,8 @@ jobs:
         run: npm ci
 
       - name: Build frontend
+        env:
+          VITE_API_URL: https://docflowww-new-backend.vercel.app/api
         run: npm run build
 
       - name: Support SPA routes

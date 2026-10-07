@@ -128,7 +128,7 @@ def oauth_state_cookie_kwargs(request) -> dict:
 
 
 def public_google_redirect_uri() -> str:
-    return f"{settings.frontend_url.rstrip('/')}/api/auth/google/callback"
+    return settings.google_redirect_uri
 
 
 def google_authorization_url(state: str) -> str:

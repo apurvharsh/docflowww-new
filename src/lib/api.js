@@ -47,6 +47,12 @@ async function request(path, { method = 'GET', body, isForm = false, auth = true
   }
 
   if (!response.ok) {
+    if (response.status === 401 && auth) {
+      setToken(null);
+      if (window.location.pathname !== `${import.meta.env.BASE_URL}login`) {
+        window.location.replace(`${import.meta.env.BASE_URL}login`);
+      }
+    }
     const detail = (payload && payload.detail) || response.statusText || 'Request failed';
     throw new ApiError(detail, response.status, payload);
   }

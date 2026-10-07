@@ -14,6 +14,7 @@ class Settings(BaseSettings):
 
     qdrant_url: str | None = None
     qdrant_api_key: str | None = None
+    database_url: str | None = None
     qdrant_path: str = str(BACKEND_DIR / "qdrant_data")
     database_path: str = str(BACKEND_DIR / "docflow.db")
     feature_database_path: str = str(BACKEND_DIR / "docflow_features.db")

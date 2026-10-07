@@ -1,13 +1,72 @@
 """SQLite application database for projects and uploaded documents."""
 
 import json
+import re
 import sqlite3
 from uuid import uuid4
 from datetime import datetime, timezone
 from app.config import settings
 
 
-def _connect() -> sqlite3.Connection:
+class _PostgresConnection:
+    """Adapt the existing SQLite-shaped query layer to PostgreSQL."""
+
+    def __init__(self):
+        import psycopg2
+        from psycopg2.extras import DictCursor
+
+        self._connection = psycopg2.connect(settings.database_url)
+        self._cursor_factory = DictCursor
+
+    def _sql(self, query: str) -> str:
+        query = query.replace("?", "%s")
+        query = re.sub(r"INSERT OR IGNORE INTO", "INSERT INTO", query, flags=re.IGNORECASE)
+        query = re.sub(r"INSERT OR REPLACE INTO (user_roles|workflow_state)", r"INSERT INTO \1", query, flags=re.IGNORECASE)
+        if query.lstrip().upper().startswith("INSERT INTO user_roles") and "ON CONFLICT" not in query.upper():
+            query = f"{query.rstrip().rstrip(';')} ON CONFLICT (user_id, project_id) DO UPDATE SET role = EXCLUDED.role, assigned_at = EXCLUDED.assigned_at"
+        elif query.lstrip().upper().startswith("INSERT INTO workflow_state") and "ON CONFLICT" not in query.upper():
+            query = f"{query.rstrip().rstrip(';')} ON CONFLICT (document_id) DO UPDATE SET state = EXCLUDED.state, approved_by = EXCLUDED.approved_by, approval_timestamp = EXCLUDED.approval_timestamp, rejection_reason = EXCLUDED.rejection_reason"
+        elif query.lstrip().upper().startswith("INSERT INTO") and "ON CONFLICT" not in query.upper():
+            query = f"{query.rstrip().rstrip(';')} ON CONFLICT DO NOTHING"
+        return query
+
+    def execute(self, query: str, params=()):
+        pragma = re.fullmatch(r"\s*PRAGMA table_info\((\w+)\)\s*", query, flags=re.IGNORECASE)
+        cursor = self._connection.cursor(cursor_factory=self._cursor_factory)
+        if pragma:
+            cursor.execute(
+                """
+                SELECT ordinal_position - 1 AS cid, column_name AS name, data_type AS type,
+                       0 AS notnull, NULL AS dflt_value, 0 AS pk
+                FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = %s
+                ORDER BY ordinal_position
+                """,
+                (pragma.group(1),),
+            )
+        else:
+            cursor.execute(self._sql(query), params)
+        return cursor
+
+    def executescript(self, script: str):
+        for statement in script.split(";"):
+            if statement.strip():
+                self.execute(statement)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if exc_type:
+            self._connection.rollback()
+        else:
+            self._connection.commit()
+        self._connection.close()
+
+
+def _connect():
+    if settings.database_url:
+        return _PostgresConnection()
     connection = sqlite3.connect(settings.database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -15,6 +74,8 @@ def _connect() -> sqlite3.Connection:
 
 
 def _feature_connect() -> sqlite3.Connection:
+    if settings.database_url:
+        return _PostgresConnection()
     connection = sqlite3.connect(settings.feature_database_path)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
@@ -254,7 +315,7 @@ def initialize_feature_database() -> None:
     with _feature_connect() as connection:
         connection.executescript(
             """
-            CREATE TABLE IF NOT EXISTS document_versions (
+            CREATE TABLE IF NOT EXISTS feature_document_versions (
                 version_id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL,
                 document_id TEXT NOT NULL,
@@ -268,7 +329,7 @@ def initialize_feature_database() -> None:
                 UNIQUE (tenant_id, document_id, version_number)
             );
             CREATE INDEX IF NOT EXISTS idx_feature_versions_document
-                ON document_versions(tenant_id, document_id, version_number DESC);
+                ON feature_document_versions(tenant_id, document_id, version_number DESC);
             CREATE TABLE IF NOT EXISTS personal_documents (
                 document_id TEXT PRIMARY KEY,
                 tenant_id TEXT NOT NULL,
@@ -861,7 +922,7 @@ def create_document_version(
     version_id = str(uuid4())
     with _feature_connect() as connection:
         row = connection.execute(
-            "SELECT COALESCE(MAX(version_number), 0) AS latest FROM document_versions WHERE tenant_id = ? AND document_id = ?",
+            "SELECT COALESCE(MAX(version_number), 0) AS latest FROM feature_document_versions WHERE tenant_id = ? AND document_id = ?",
             (tenant_id, document_id),
         ).fetchone()
         version = {
@@ -877,7 +938,7 @@ def create_document_version(
             "created_at": timestamp,
         }
         connection.execute(
-            """INSERT INTO document_versions
+            """INSERT INTO feature_document_versions
             (version_id, tenant_id, document_id, version_number, filename, stored_path,
              file_size_bytes, uploaded_by, status, created_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -889,7 +950,7 @@ def create_document_version(
 def list_document_versions(tenant_id: str, document_id: str) -> list[dict]:
     with _feature_connect() as connection:
         rows = connection.execute(
-            """SELECT * FROM document_versions
+            """SELECT * FROM feature_document_versions
             WHERE tenant_id = ? AND document_id = ?
             ORDER BY version_number DESC""",
             (tenant_id, document_id),
@@ -952,7 +1013,7 @@ def delete_document(tenant_id: str, document_id: str) -> bool:
             (tenant_id, document_id),
         )
     with _feature_connect() as connection:
-        connection.execute("DELETE FROM document_versions WHERE tenant_id = ? AND document_id = ?", (tenant_id, document_id))
+        connection.execute("DELETE FROM feature_document_versions WHERE tenant_id = ? AND document_id = ?", (tenant_id, document_id))
     return cursor.rowcount > 0
 
 
